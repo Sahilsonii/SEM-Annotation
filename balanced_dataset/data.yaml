@@ -1,0 +1,10 @@
+names:
+- PbI2
+- 3D_pinholes
+- 3D-2D_pinholes
+- 3D_background
+- 3D-2D_background
+nc: 5
+path: C:\Users\asus\Desktop\SEM annotation\sem_app\balanced_dataset
+train: images
+val: images

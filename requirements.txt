@@ -1,0 +1,16 @@
+# PyTorch with CUDA 11.8 (matches current local environment)
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.7.1+cu118
+torchvision==0.22.1+cu118
+torchaudio==2.7.1+cu118
+
+# Core Dependencies
+ultralytics==8.4.7
+streamlit==1.40.0
+pandas==2.3.3
+
+# Other necessary dependencies for the app
+streamlit-drawable-canvas==0.9.3
+opencv-python-headless
+pyyaml
+Pillow
