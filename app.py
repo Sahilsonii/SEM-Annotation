@@ -1,7 +1,7 @@
 import streamlit as st
 import os
-import utils
-import logger_setup
+from src.handlers import utils
+from src import logger_setup
 import warnings
 import logging
 
@@ -108,7 +108,7 @@ if app_mode == "Data Explorer & Labeling":
                     if st.button("🤖 SAM", use_container_width=True):
                         with st.spinner("Running SAM..."):
                             try:
-                                from sam_handler import auto_annotate_with_sam
+                                from src.handlers.sam_handler import auto_annotate_with_sam
                                 count = auto_annotate_with_sam([current_image], labels_dir, conf_threshold=0.5)
                                 if count > 0:
                                     st.success("SAM annotation saved!")
@@ -136,7 +136,7 @@ if app_mode == "Data Explorer & Labeling":
                                             model_path = os.path.join(root, "model_final.pth")
                                             break
                                 if model_path:
-                                    from detectron2_handler import auto_annotate_with_detectron2
+                                    from src.handlers.detectron2_handler import auto_annotate_with_detectron2
                                     count = auto_annotate_with_detectron2(
                                         [current_image], labels_dir, model_path, conf_threshold=0.25
                                     )
@@ -265,7 +265,7 @@ if app_mode == "Data Explorer & Labeling":
                         if st.button("🚀 Run OpenCV Detection", type="primary"):
                             with st.spinner("Processing..."):
                                 try:
-                                    from opencv_handler import auto_annotate_with_opencv
+                                    from src.handlers.opencv_handler import auto_annotate_with_opencv
                                     count = auto_annotate_with_opencv(
                                         [current_image], labels_dir,
                                         class_id=cv_class_id,   # auto-set from folder
@@ -291,7 +291,7 @@ if app_mode == "Data Explorer & Labeling":
                                     st.error(f"Error: {e}")
 
                 # --- Canvas annotation UI ------------------------------------
-                from canvas_ui import annotation_interface
+                from src.handlers.canvas_ui import annotation_interface
                 result = annotation_interface(
                     current_image, labels_path=label_path
                 )
@@ -395,7 +395,7 @@ elif app_mode == "Train Model":
                     st.error("❌ Balanced dataset not found!")
                     st.info("Run `python balance_dataset.py` in the sem_app folder first.")
                 else:
-                    from model_handler import ModelHandler
+                    from src.model_handler import ModelHandler
                     handler = ModelHandler()
                     
                     classes = {
@@ -463,7 +463,7 @@ elif app_mode == "Train Model":
                 st.write(f"Found {len(all_pairs)} labeled images.")
 
                 if len(all_pairs) > 0:
-                    from model_handler import ModelHandler
+                    from src.model_handler import ModelHandler
                     handler = ModelHandler()
 
                     classes = {
@@ -548,7 +548,7 @@ elif app_mode == "Auto-Annotation Inference":
 
             if st.button("Start Auto-Labeling"):
                 project_root = os.path.dirname(os.path.abspath(__file__))
-                from model_handler import ModelHandler
+                from src.model_handler import ModelHandler
                 handler = ModelHandler(selected_model)
                 # FIX: Removed unused `classes` dict — auto_annotate_folder no longer
                 # needs it (class IDs are stored in the model weights).
@@ -576,7 +576,7 @@ elif app_mode == "Auto-Annotation Inference":
 
             if st.button("Start SAM Auto-Labeling"):
                 try:
-                    from sam_handler import auto_annotate_with_sam
+                    from src.handlers.sam_handler import auto_annotate_with_sam
                     project_root  = os.path.dirname(os.path.abspath(__file__))
                     total_labeled = 0
 
@@ -620,7 +620,7 @@ elif app_mode == "Auto-Annotation Inference":
 
                 if st.button("Start Detectron2 Auto-Labeling"):
                     try:
-                        from detectron2_handler import auto_annotate_with_detectron2
+                        from src.handlers.detectron2_handler import auto_annotate_with_detectron2
                         project_root  = os.path.dirname(os.path.abspath(__file__))
                         total_labeled = 0
 
@@ -725,7 +725,7 @@ elif app_mode == "Multi-Model Benchmark":
 
                 status_cells[label].markdown(f"**{label}**\n\n🔄 Training…")
                 try:
-                    from model_handler import ModelHandler
+                    from src.model_handler import ModelHandler
                     handler = ModelHandler(weights_path if os.path.exists(weights_path) else weights)
                     results, metrics_path = handler.train_model(
                         bm_yaml_path,
