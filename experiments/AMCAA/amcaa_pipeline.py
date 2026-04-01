@@ -47,9 +47,14 @@ def load_image(path: str) -> Tuple[np.ndarray, np.ndarray]:
 def crop_sem_bar(gray: np.ndarray, color: np.ndarray) -> Tuple[np.ndarray, np.ndarray, int]:
     h, w = gray.shape
     scan = gray[int(h * 0.85):, :]
-    row_means = np.mean(scan, axis=1)
-    dark_rows = np.where(row_means < 30)[0]
-    cut_y = int(h * 0.85) + dark_rows[0] if len(dark_rows) > 5 else h
+    row_medians = np.median(scan, axis=1)
+    dark_rows = np.where(row_medians < 15)[0]
+    if len(dark_rows) > 0:
+        # Cut 5 pixels above the strictly dark text background to clear the white divider line
+        cut_y = int(h * 0.85) + dark_rows[0] - 5
+    else:
+        # Fallback to hard 12% bottom crop to safely remove metadata
+        cut_y = int(h * 0.88)
     return gray[:cut_y, :], color[:cut_y, :], cut_y
 
 
@@ -343,6 +348,9 @@ def run_folder(input_dir: str, output_dir: str,
     for root, _, files in os.walk(input_dir):
         for fname in sorted(files):
             if not fname.lower().endswith(extensions):
+                continue
+            if "aug" in fname.lower():
+                print(f"  Skipping augmented image: {fname}")
                 continue
             fpath = os.path.join(root, fname)
             dets  = run_single(fpath, output_dir)

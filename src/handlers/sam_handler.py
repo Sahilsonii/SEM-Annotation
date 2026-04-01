@@ -78,23 +78,29 @@ def auto_annotate_with_sam(images, output_dir, conf_threshold=0.5):
         # Convert to YOLO format
         yolo_lines = []
         for mask_data in masks:
-            segmentation = mask_data['segmentation']
+            segmentation = mask_data['segmentation'].astype(np.uint8)
             
-            # Get bounding box from mask
-            coords = np.argwhere(segmentation)
-            if len(coords) == 0:
+            # Get contour
+            contours, _ = cv2.findContours(segmentation, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:
                 continue
                 
-            y_min, x_min = coords.min(axis=0)
-            y_max, x_max = coords.max(axis=0)
+            largest_contour = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(largest_contour) < 10:
+                continue
+                
+            points = largest_contour.squeeze(axis=1)
+            if points.ndim != 2 or points.shape[0] < 3:
+                continue
+                
+            # Convert to normalized YOLO format (class x1 y1 x2 y2 ...)
+            norm_points = []
+            for pt in points:
+                nx = np.clip(float(pt[0]) / w, 0.0, 1.0)
+                ny = np.clip(float(pt[1]) / h, 0.0, 1.0)
+                norm_points.extend([f"{nx:.6f}", f"{ny:.6f}"])
             
-            # Convert to YOLO format
-            x_center = ((x_min + x_max) / 2) / w
-            y_center = ((y_min + y_max) / 2) / h
-            width = (x_max - x_min) / w
-            height = (y_max - y_min) / h
-            
-            yolo_lines.append(f"1 {x_center} {y_center} {width} {height}")
+            yolo_lines.append(f"1 " + " ".join(norm_points))
         
         # Save if any detections
         if yolo_lines:

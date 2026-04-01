@@ -122,33 +122,7 @@ if app_mode == "Data Explorer & Labeling":
                                 st.error(f"Error: {e}")
 
                 with col_b:
-                    if st.button("🔬 Detectron2", use_container_width=True):
-                        with st.spinner("Running Detectron2..."):
-                            try:
-                                detectron_model_dir = os.path.join(
-                                    os.path.dirname(os.path.dirname(__file__)),
-                                    "detectron2_pipeline", "output"
-                                )
-                                model_path = None
-                                if os.path.exists(detectron_model_dir):
-                                    for root, dirs, files in os.walk(detectron_model_dir):
-                                        if "model_final.pth" in files:
-                                            model_path = os.path.join(root, "model_final.pth")
-                                            break
-                                if model_path:
-                                    from src.handlers.detectron2_handler import auto_annotate_with_detectron2
-                                    count = auto_annotate_with_detectron2(
-                                        [current_image], labels_dir, model_path, conf_threshold=0.25
-                                    )
-                                    if count > 0:
-                                        st.success("Detectron2 annotation saved!")
-                                        st.rerun()
-                                    else:
-                                        st.warning("No objects detected")
-                                else:
-                                    st.error("No model found. Train first.")
-                            except Exception as e:
-                                st.error(f"Error: {e}")
+                    st.empty() # Placeholder since we removed Detectron2
 
                 with col_c:
                     opencv_button = st.button("🎯 OpenCV", use_container_width=True)
@@ -313,18 +287,38 @@ if app_mode == "Data Explorer & Labeling":
                                 "3D-2D mixed perovskite with pinholes":  2,
                             }
                             for obj in objects:
+                                obj_label = obj.get("label", current_class_name)
+                                cls       = label_map.get(obj_label, 0)
+                                
                                 if obj["type"] == "rect":
                                     x = obj["left"]
                                     y = obj["top"]
                                     w = obj["width"]
                                     h = obj["height"]
-                                    obj_label = obj.get("label", current_class_name)
-                                    cls       = label_map.get(obj_label, 0)
                                     x_center  = (x + w / 2) / img_w
                                     y_center  = (y + h / 2) / img_h
                                     w_norm    = w / img_w
                                     h_norm    = h / img_h
                                     yolo_lines.append(f"{cls} {x_center} {y_center} {w_norm} {h_norm}")
+                                    
+                                elif obj["type"] in ["path", "polygon"]:
+                                    import numpy as np
+                                    path_data = obj.get("path", [])
+                                    base_x = obj.get("left", 0)
+                                    base_y = obj.get("top", 0)
+                                    poly_coords = []
+                                    
+                                    for cmd_array in path_data:
+                                        cmd = cmd_array[0]
+                                        if cmd in ["M", "L", "C", "Q"] and len(cmd_array) >= 3:
+                                            px = float(cmd_array[-2]) + float(base_x)
+                                            py = float(cmd_array[-1]) + float(base_y)
+                                            nx = np.clip(px / float(img_w), 0.0, 1.0)
+                                            ny = np.clip(py / float(img_h), 0.0, 1.0)
+                                            poly_coords.extend([f"{nx:.6f}", f"{ny:.6f}"])
+                                            
+                                    if len(poly_coords) >= 6:
+                                        yolo_lines.append(f"{cls} " + " ".join(poly_coords))
 
                             with open(label_path, "w") as f:
                                 f.write("\n".join(yolo_lines))
@@ -503,7 +497,7 @@ elif app_mode == "Auto-Annotation Inference":
 
     annotation_method = st.radio(
         "Select Auto-Annotation Method",
-        ["YOLO (Fast)", "SAM (Segment Anything)", "Detectron2 (Research-Grade)"],
+        ["YOLO (Fast)", "SAM (Segment Anything)"],
         horizontal=True
     )
 
@@ -597,49 +591,6 @@ elif app_mode == "Auto-Annotation Inference":
                     st.error(f"SAM error: {e}")
                     st.info("Make sure SAM is installed in sam_pinhole_annotation folder")
 
-        # ── Detectron2 ────────────────────────────────────────────────────────
-        elif annotation_method == "Detectron2 (Research-Grade)":
-            st.warning("Detectron2 provides research-grade detection. Requires trained model.")
-
-            detectron_model_dir = os.path.join(
-                os.path.dirname(os.path.dirname(__file__)), "detectron2_pipeline", "output"
-            )
-            model_options = []
-
-            if os.path.exists(detectron_model_dir):
-                for root, dirs, files in os.walk(detectron_model_dir):
-                    for file in files:
-                        if file == "model_final.pth":
-                            model_options.append(os.path.join(root, file))
-
-            if not model_options:
-                st.error("No Detectron2 models found. Train a model first using detectron2_pipeline.")
-            else:
-                selected_model = st.selectbox("Select Detectron2 Model", model_options)
-                conf_threshold = st.slider("Confidence Threshold", min_value=0.01, max_value=1.0, value=0.25, step=0.01)
-
-                if st.button("Start Detectron2 Auto-Labeling"):
-                    try:
-                        from src.handlers.detectron2_handler import auto_annotate_with_detectron2
-                        project_root  = os.path.dirname(os.path.abspath(__file__))
-                        total_labeled = 0
-
-                        with st.status("Processing with Detectron2...") as status:
-                            for folder in selected_folders:
-                                status.write(f"Processing {folder}...")
-                                img_folder = os.path.join(data_root, folder)
-                                lbl_dir    = os.path.join(project_root, "labels", folder)
-                                os.makedirs(lbl_dir, exist_ok=True)
-
-                                imgs  = utils.get_image_files(img_folder)
-                                count = auto_annotate_with_detectron2(imgs, lbl_dir, selected_model, conf_threshold)
-                                total_labeled += count
-                                status.write(f"Labeled {count} images in {folder}.")
-
-                        st.success(f"Detectron2 Auto-Annotation Complete! Total: {total_labeled}")
-                    except Exception as e:
-                        st.error(f"Detectron2 error: {e}")
-                        st.info("Make sure Detectron2 is installed in detectron2_pipeline folder")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # MULTI-MODEL BENCHMARK

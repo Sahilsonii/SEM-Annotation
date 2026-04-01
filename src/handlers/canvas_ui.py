@@ -25,7 +25,7 @@ def annotation_interface(image_path, labels_path=None):
 
     # Canvas settings
     drawing_mode = st.radio(
-        "Drawing tool:", ("rect", "transform"), horizontal=True
+        "Drawing tool:", ("rect", "polygon", "transform"), horizontal=True
     )
     
     stroke_width = 2
@@ -47,35 +47,64 @@ def annotation_interface(image_path, labels_path=None):
             
             img_w, img_h = bg_image.size
             objects = []
-            for line in lines:
+            import random
+            colors = [
+                "rgba(255, 99, 132, 0.4)",   # Red
+                "rgba(54, 162, 235, 0.4)",   # Blue
+                "rgba(255, 206, 86, 0.4)",   # Yellow
+                "rgba(75, 192, 192, 0.4)",   # Teal
+                "rgba(153, 102, 255, 0.4)",  # Purple
+                "rgba(255, 159, 64, 0.4)",   # Orange
+                "rgba(83, 215, 105, 0.4)",   # Green
+                "rgba(214, 25, 118, 0.4)"    # Pink
+            ]
+            for i, line in enumerate(lines):
                 parts = line.strip().split()
-                if len(parts) >= 5:
+                color = colors[i % len(colors)]
+                
+                if len(parts) == 5:
                     cls = int(parts[0])
-                    xc = float(parts[1])
-                    yc = float(parts[2])
-                    w = float(parts[3])
-                    h = float(parts[4])
+                    xc, yc = float(parts[1]), float(parts[2])
+                    w, h = float(parts[3]), float(parts[4])
                     
-                    # Convert back to pixel rect
-                    width = w * img_w
-                    height = h * img_h
+                    width, height = w * img_w, h * img_h
                     left = (xc * img_w) - (width / 2)
                     top = (yc * img_h) - (height / 2)
                     
                     label_name = class_map.get(cls, "Unknown")
                     
-                    obj = {
+                    objects.append({
                         "type": "rect",
-                        "left": left,
-                        "top": top,
-                        "width": width,
-                        "height": height,
-                        "fill": "rgba(255, 165, 0, 0.3)",
-                        "stroke": "#000000",
-                        "strokeWidth": stroke_width,
-                        "label": label_name
-                    }
-                    objects.append(obj)
+                        "left": left, "top": top, "width": width, "height": height,
+                        "fill": color, "stroke": "#000000",
+                        "strokeWidth": stroke_width, "label": label_name
+                    })
+                elif len(parts) > 5 and len(parts) % 2 == 1:
+                    cls = int(parts[0])
+                    # Parse polygon point tuples
+                    x_coords = [float(parts[j]) * img_w for j in range(1, len(parts), 2)]
+                    y_coords = [float(parts[j+1]) * img_h for j in range(1, len(parts), 2)]
+                    
+                    left, top = min(x_coords), min(y_coords)
+                    width, height = max(x_coords) - left, max(y_coords) - top
+                    
+                    # Convert absolute image coordinates to relative bounding-box coordinates for the fabric.js Path object
+                    path_data = []
+                    for k in range(len(x_coords)):
+                        cmd = "M" if k == 0 else "L"
+                        path_data.append([cmd, x_coords[k] - left, y_coords[k] - top])
+                    path_data.append(["Z"])
+                    
+                    label_name = class_map.get(cls, "Unknown")
+                    
+                    objects.append({
+                        "type": "path",
+                        "path": path_data,
+                        "left": left, "top": top, "width": width, "height": height,
+                        "scaleX": 1, "scaleY": 1,
+                        "fill": color, "stroke": "#000000",
+                        "strokeWidth": stroke_width, "label": label_name
+                    })
             
             initial_img_data = {"objects": objects, "background": ""}
         except Exception as e:
