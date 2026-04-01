@@ -1,10 +1,21 @@
 import streamlit as st
 import os
 from streamlit_drawable_canvas import st_canvas
+import streamlit.elements.image as st_image
 from PIL import Image
 import pandas as pd
 
 def annotation_interface(image_path, labels_path=None):
+    # streamlit-drawable-canvas 0.9.3 depends on an internal Streamlit API
+    # (`image_to_url`) that is absent in newer Streamlit versions.
+    if not hasattr(st_image, "image_to_url"):
+        st.error(
+            "Incompatible package versions: streamlit-drawable-canvas requires "
+            "an older Streamlit build. Activate the project venv and install "
+            "requirements.txt (streamlit==1.40.0)."
+        )
+        return None
+
     # Load image
     try:
         bg_image = Image.open(image_path)

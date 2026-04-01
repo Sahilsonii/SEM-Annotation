@@ -2,6 +2,7 @@ import os
 import sys
 import numpy as np
 import cv2
+import urllib.request
 
 # Add SAM path
 sam_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "sam_pinhole_annotation")
@@ -14,17 +15,40 @@ try:
 except:
     SAM_AVAILABLE = False
 
+
+def _download_sam_checkpoint(model_dir):
+    """Download SAM checkpoint if not present"""
+    os.makedirs(model_dir, exist_ok=True)
+    checkpoint_path = os.path.join(model_dir, "sam_vit_b_01ec64.pth")
+    
+    if os.path.exists(checkpoint_path):
+        return checkpoint_path
+    
+    checkpoint_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
+    
+    print(f"Downloading SAM checkpoint from {checkpoint_url}")
+    print("This is a large file (~375 MB) and may take several minutes...")
+    
+    try:
+        urllib.request.urlretrieve(checkpoint_url, checkpoint_path)
+        print(f"✓ Checkpoint downloaded to {checkpoint_path}")
+        return checkpoint_path
+    except Exception as e:
+        raise RuntimeError(f"Failed to download SAM checkpoint: {e}")
+
 def auto_annotate_with_sam(images, output_dir, conf_threshold=0.5):
     """Auto-annotate images using SAM with automatic mask generation"""
     if not SAM_AVAILABLE:
         raise ImportError("SAM not available. Install: pip install segment-anything")
     
-    # Load SAM model
-    sam_checkpoint = os.path.join(os.path.dirname(os.path.dirname(__file__)), 
-                                   "sam_pinhole_annotation", "sam", "sam_vit_b_01ec64.pth")
-    if not os.path.exists(sam_checkpoint):
-        raise FileNotFoundError(f"SAM checkpoint not found at {sam_checkpoint}")
+    # Load SAM model with automatic download
+    model_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 
+                              "sam_pinhole_annotation", "sam")
     
+    # Download checkpoint if needed
+    sam_checkpoint = _download_sam_checkpoint(model_dir)
+    
+    # Load model
     sam = sam_model_registry["vit_b"](checkpoint=sam_checkpoint)
     sam.to(device="cpu")
     mask_generator = SamAutomaticMaskGenerator(
