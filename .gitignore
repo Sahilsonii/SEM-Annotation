@@ -70,6 +70,19 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+balanced_dataset/
+balanced_dataset_split/
+experiments/AMCAA/outputs
+experiments/dynamic_kernel/bbox_overlays
+experiments/dynamic_kernel/filtered_images
+experiments/dynamic_kernel/kernel_maps
+experiments/dynamic_kernel/labels
+experiments/dynamic_kernel/masks
+labels/sem_app
+runs/detect
+labels/
+runs/metrics
+src/sam_pinhole_annotation/sam/
 
 # PyBuilder
 .pybuilder/
