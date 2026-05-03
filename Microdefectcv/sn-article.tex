@@ -1278,6 +1278,24 @@ current dataset size as the main constraint on model performance.
 The trained YOLO11m weights are available at the repository listed
 in the Code Availability section.
 
+\begin{figure*}[t]
+\centering
+\begin{minipage}{0.32\textwidth}
+\centering
+\includegraphics[width=\linewidth]{model_map5095_comparison.png}
+\end{minipage}\hfill
+\begin{minipage}{0.32\textwidth}
+\centering
+\includegraphics[width=\linewidth]{precision_recall_scatter.png}
+\end{minipage}\hfill
+\begin{minipage}{0.32\textwidth}
+\centering
+\includegraphics[width=\linewidth]{training_time.png}
+\end{minipage}
+\caption{Performance evaluation of the trained YOLO models. From left to right: Comparison of mAP50-95 scores across models showing YOLO11m's superior performance; precision-recall trade-off distribution; and training time requirements for 50 epochs.}
+\label{fig:yolo_charts}
+\end{figure*}
+
 \subsection{Ablation Results}\label{subsec:ablation_results}
 
 \begin{table}[h]
