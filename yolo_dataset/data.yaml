@@ -1,8 +1,0 @@
-path: C:\Users\asus\Desktop\SEM annotation\sem_app\yolo_dataset
-train: images/train
-val: images/val
-nc: 3
-names:
-  - 3D perovskite with PbI2 excess
-  - 3D perovskite with pinholes
-  - 3D-2D mixed perovskite with pinholes

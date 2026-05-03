@@ -21,11 +21,15 @@ class ModelHandler:
         """
         Load a YOLO model.
         Args:
-            model_path: Path to a trained .pt file. If None, loads pretrained yolov8s.
+            model_path: Path to a trained .pt file or model name (e.g., 'yolo11s.pt').
         """
         if model_path and os.path.exists(model_path):
             self.model = YOLO(model_path)
             logger.info(f"Loaded model from: {model_path}")
+        elif model_path:
+            # Model name provided but file doesn't exist - download from Ultralytics
+            self.model = YOLO(model_path)
+            logger.info(f"Loaded pretrained {model_path}")
         else:
             self.model = YOLO("yolov8s.pt")
             logger.info("Loaded pretrained yolov8s.")

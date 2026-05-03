@@ -72,6 +72,7 @@ instance/
 docs/_build/
 balanced_dataset/
 balanced_dataset_split/
+dataset_split_224/
 experiments/AMCAA/outputs
 experiments/dynamic_kernel/bbox_overlays
 experiments/dynamic_kernel/filtered_images
@@ -80,10 +81,10 @@ experiments/dynamic_kernel/labels
 experiments/dynamic_kernel/masks
 labels/sem_app
 runs/detect
-labels/
 runs/metrics
 src/sam_pinhole_annotation/sam/
-
+Microdefectcv/
+microdefectcv_release/
 # PyBuilder
 .pybuilder/
 target/
@@ -171,3 +172,21 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+.pt/
+
+yolo11l.pt
+
+yolo11m.pt
+
+yolo11s.pt
+
+yolo26n.pt
+
+yolov8s.pt
+
+dynamic_kernel_v2/
+
+dynamic_kernel/
+
+runs/

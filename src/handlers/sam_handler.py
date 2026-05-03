@@ -1,111 +1,106 @@
+"""
+SAM (Segment Anything Model) handler for auto-annotation.
+"""
 import os
-import sys
-import numpy as np
-import cv2
-import urllib.request
+import logging
+from PIL import Image
 
-# Add SAM path
-sam_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "sam_pinhole_annotation")
-if sam_path not in sys.path:
-    sys.path.append(sam_path)
-
-try:
-    from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
-    SAM_AVAILABLE = True
-except:
-    SAM_AVAILABLE = False
+logger = logging.getLogger(__name__)
 
 
-def _download_sam_checkpoint(model_dir):
-    """Download SAM checkpoint if not present"""
-    os.makedirs(model_dir, exist_ok=True)
-    checkpoint_path = os.path.join(model_dir, "sam_vit_b_01ec64.pth")
+def auto_annotate_with_sam(image_list, labels_dir, conf_threshold=0.5):
+    """
+    Auto-annotate images using SAM (Segment Anything Model).
     
-    if os.path.exists(checkpoint_path):
-        return checkpoint_path
+    Args:
+        image_list: List of image paths
+        labels_dir: Directory to save labels
+        conf_threshold: Confidence threshold for detections
+        
+    Returns:
+        Number of images annotated
+    """
+    try:
+        # Try to import SAM
+        from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
+    except ImportError:
+        raise ImportError(
+            "SAM not installed. Please install with: pip install segment-anything"
+        )
     
-    checkpoint_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
+    os.makedirs(labels_dir, exist_ok=True)
     
-    print(f"Downloading SAM checkpoint from {checkpoint_url}")
-    print("This is a large file (~375 MB) and may take several minutes...")
+    # Initialize SAM model
+    # Note: This requires downloading SAM checkpoint
+    logger.info("Loading SAM model...")
+    sam_checkpoint = "sam_vit_h_4b8939.pth"  # Default SAM checkpoint
+    model_type = "vit_h"
+    
+    if not os.path.exists(sam_checkpoint):
+        logger.error(f"SAM checkpoint not found: {sam_checkpoint}")
+        logger.info("Download from: https://github.com/facebookresearch/segment-anything")
+        return 0
     
     try:
-        urllib.request.urlretrieve(checkpoint_url, checkpoint_path)
-        print(f"✓ Checkpoint downloaded to {checkpoint_path}")
-        return checkpoint_path
+        sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
+        mask_generator = SamAutomaticMaskGenerator(sam)
     except Exception as e:
-        raise RuntimeError(f"Failed to download SAM checkpoint: {e}")
-
-def auto_annotate_with_sam(images, output_dir, conf_threshold=0.5):
-    """Auto-annotate images using SAM with automatic mask generation"""
-    if not SAM_AVAILABLE:
-        raise ImportError("SAM not available. Install: pip install segment-anything")
+        logger.error(f"Failed to load SAM model: {e}")
+        return 0
     
-    # Load SAM model with automatic download
-    model_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 
-                              "sam_pinhole_annotation", "sam")
-    
-    # Download checkpoint if needed
-    sam_checkpoint = _download_sam_checkpoint(model_dir)
-    
-    # Load model
-    sam = sam_model_registry["vit_b"](checkpoint=sam_checkpoint)
-    sam.to(device="cpu")
-    mask_generator = SamAutomaticMaskGenerator(
-        model=sam,
-        pred_iou_thresh=conf_threshold,
-        stability_score_thresh=conf_threshold
-    )
-    
-    labeled_count = 0
-    
-    for img_path in images:
+    count = 0
+    for img_path in image_list:
         base_name = os.path.splitext(os.path.basename(img_path))[0]
-        label_path = os.path.join(output_dir, base_name + ".txt")
+        txt_path = os.path.join(labels_dir, base_name + ".txt")
         
-        # Skip if already labeled
-        if os.path.exists(label_path):
+        if os.path.exists(txt_path):
+            logger.info(f"Skipping {img_path} - already annotated")
             continue
         
-        # Load image
-        img = cv2.imread(img_path)
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        h, w = img.shape[:2]
-        
-        # Generate masks
-        masks = mask_generator.generate(img_rgb)
-        
-        # Convert to YOLO format
-        yolo_lines = []
-        for mask_data in masks:
-            segmentation = mask_data['segmentation'].astype(np.uint8)
+        try:
+            # Load image
+            img = Image.open(img_path).convert("RGB")
+            import numpy as np
+            img_array = np.array(img)
             
-            # Get contour
-            contours, _ = cv2.findContours(segmentation, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if not contours:
-                continue
-                
-            largest_contour = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(largest_contour) < 10:
-                continue
-                
-            points = largest_contour.squeeze(axis=1)
-            if points.ndim != 2 or points.shape[0] < 3:
-                continue
-                
-            # Convert to normalized YOLO format (class x1 y1 x2 y2 ...)
-            norm_points = []
-            for pt in points:
-                nx = np.clip(float(pt[0]) / w, 0.0, 1.0)
-                ny = np.clip(float(pt[1]) / h, 0.0, 1.0)
-                norm_points.extend([f"{nx:.6f}", f"{ny:.6f}"])
+            # Generate masks
+            masks = mask_generator.generate(img_array)
             
-            yolo_lines.append(f"1 " + " ".join(norm_points))
-        
-        # Save if any detections
-        if yolo_lines:
-            with open(label_path, 'w') as f:
+            # Convert to YOLO format
+            h, w = img_array.shape[:2]
+            yolo_lines = []
+            
+            for mask in masks:
+                if mask['predicted_iou'] < conf_threshold:
+                    continue
+                
+                # Get bounding box from segmentation
+                segmentation = mask['segmentation']
+                y_indices, x_indices = np.where(segmentation)
+                
+                if len(x_indices) == 0 or len(y_indices) == 0:
+                    continue
+                
+                x_min, x_max = x_indices.min(), x_indices.max()
+                y_min, y_max = y_indices.min(), y_indices.max()
+                
+                # Convert to YOLO format
+                x_center = ((x_min + x_max) / 2) / w
+                y_center = ((y_min + y_max) / 2) / h
+                width = (x_max - x_min) / w
+                height = (y_max - y_min) / h
+                
+                # Class 1 (pinholes) as default
+                yolo_lines.append(f"1 {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}")
+            
+            # Save annotations
+            with open(txt_path, 'w') as f:
                 f.write('\n'.join(yolo_lines))
-            labeled_count += 1
+            
+            count += 1
+            logger.info(f"Annotated {img_path}: {len(yolo_lines)} objects detected")
+            
+        except Exception as e:
+            logger.error(f"Error processing {img_path}: {e}")
     
-    return labeled_count
+    return count

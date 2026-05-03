@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Perovskite Defect Detector — AI-Powered SEM Analysis</title>
+  <meta name="description" content="Production-grade YOLO11m-powered defect detection for Perovskite Solar Cell SEM images. Upload 224×224 px patches to identify PbI₂ excess, pinholes, and structural defects." />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+
+<!-- ═══════════════════════════════════ NAVBAR ═══════════════════════════════════ -->
+<nav class="navbar">
+  <div class="logo">
+    <div class="icon">☀</div>
+    <span>PerovskiteAI</span>
+  </div>
+  <div class="nav-tabs" id="navTabs">
+    <button class="nav-tab active" data-tab="detect">🔬 Detect Defects</button>
+    <button class="nav-tab" data-tab="annotation">✍️ Manual Annotation</button>
+    <button class="nav-tab" data-tab="science">📖 About Perovskites</button>
+    <button class="nav-tab" data-tab="benchmark">📊 Model Benchmark</button>
+  </div>
+  <div class="nav-status">
+    <button id="themeToggle" class="btn-outline" style="padding: 4px 10px; border-radius: 6px; font-size: 1.1rem; border: 1px solid var(--border); background: var(--bg-glass); cursor: pointer; color: var(--text-primary); transition: all 0.3s var(--ease);" title="Toggle Light/Dark Mode">☀️</button>
+    <div class="dot"></div>
+    <span>YOLO11m Online</span>
+  </div>
+</nav>
+
+<!-- ═══════════════════════════════════ LOADER ═══════════════════════════════════ -->
+<div class="loader-overlay" id="loader">
+  <div>
+    <div class="solar-loader">
+      <div class="ring"></div>
+      <div class="ring"></div>
+      <div class="ring"></div>
+      <div class="core"></div>
+    </div>
+    <div class="loader-text">Analyzing SEM microstructure…</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════ TAB 1 — DETECT ═══════════════════════════ -->
+<div class="tab-content">
+<section class="tab-pane active" id="tab-detect">
+
+  <div class="hero-section">
+    <h1>Perovskite Defect Detection</h1>
+    <p>Upload an SEM image of a perovskite solar cell. The YOLO11m model will localize and classify structural defects in real-time.</p>
+  </div>
+
+  <div class="glass-card">
+    <div class="drop-zone" id="dropZone">
+      <span class="upload-icon">📤</span>
+      <p><strong>Drag & drop</strong> your SEM image here, or <strong>click to browse</strong></p>
+      <p class="hint">Accepted: JPEG / PNG / TIFF (Any Resolution)</p>
+  </div>
+
+  <!-- Confidence threshold control -->
+  <div class="glass-card" style="padding: 1rem 1.5rem; margin-top: 0.75rem;">
+    <div style="display:flex; align-items:center; gap:1rem; flex-wrap:wrap;">
+      <label style="font-size:0.88rem; color:var(--text-secondary); white-space:nowrap; font-weight:500;">
+        🎯 Confidence Threshold
+      </label>
+      <input type="range" id="confSlider" min="5" max="95" value="25" step="5"
+             style="flex:1; min-width:160px; accent-color: var(--solar-orange);" />
+      <span id="confVal" style="font-size:0.95rem; font-weight:700; color:var(--solar-orange); min-width:42px; text-align:right;">25%</span>
+      <span style="font-size:0.78rem; color:var(--text-secondary);">↑ raise to reduce false positives on background images</span>
+    </div>
+  </div>
+
+  <!-- Alert box (for errors) -->
+  <div class="alert-box alert-error" id="alertError">
+    <span>⚠️</span>
+    <span id="alertErrorMsg"></span>
+  </div>
+
+  <!-- Alert box for no detection -->
+  <div class="alert-box alert-warning" id="alertNoDetect">
+    <span>🔍</span>
+    <span>No structural defects were localized in this image. The sample may be a clean background region, or the confidence threshold filtered all candidates.</span>
+  </div>
+
+  <!-- Results -->
+  <div class="results-area" id="resultsArea">
+    <div class="results-header">
+      <h2>Detection Results</h2>
+      <span class="badge badge-success" id="resultBadge"></span>
+    </div>
+
+    <div class="image-compare">
+      <div class="img-box">
+        <span class="img-label">Original</span>
+        <img id="imgOriginal" alt="Original SEM image" />
+      </div>
+      <div class="img-box">
+        <span class="img-label" style="color: var(--solar-orange);">Annotated</span>
+        <img id="imgAnnotated" alt="Annotated SEM image with bounding boxes" />
+      </div>
+    </div>
+
+    <h3 style="margin-bottom: 1rem;">Detected Defects</h3>
+    <div class="detection-list" id="detectionList"></div>
+
+    <button class="btn-reset" id="btnReset">↺ Analyze Another Image</button>
+  </div>
+
+</section>
+
+<!-- ═══════════════════════════════════ TAB 4 — ANNOTATION ═══════════════════════════ -->
+<section class="tab-pane" id="tab-annotation">
+
+  <div class="hero-section">
+    <h1>Data Explorer & Labeling</h1>
+    <p>Browse dataset folders, draw bounding boxes manually on a canvas, or auto-detect with OpenCV filters.</p>
+  </div>
+
+  <div class="annotation-layout">
+    <!-- ═══ LEFT SIDEBAR ═══ -->
+    <div class="anno-sidebar">
+
+      <!-- Directory explorer card -->
+      <div class="glass-card">
+        <h3>📁 Directory Explorer</h3>
+        <label>Root Directory (Images)</label>
+        <div class="anno-dir-row">
+          <input type="text" id="annoRootDir" class="styled-input" value="C:\Users\asus\Desktop\SEM annotation" />
+          <button id="annoLoadRoot" class="btn-primary">Load</button>
+        </div>
+
+        <label>Labels Directory</label>
+        <input type="text" id="annoLabelsRoot" class="styled-input"
+               value="C:\Users\asus\Desktop\SEM annotation\sem_app\labels"
+               title="Root folder that contains per-class label sub-folders (YOLO .txt files)" />
+
+        <label style="margin-top:0.6rem;">Class Folder</label>
+        <select id="annoClassFolder" class="styled-select" disabled>
+          <option value="">-- Load root dir first --</option>
+        </select>
+
+        <div id="annoStats" style="font-size:0.78rem; color:var(--text-muted); margin-top:0.5rem; min-height:1.2rem;"></div>
+      </div>
+
+
+      <!-- OpenCV card -->
+      <div class="glass-card">
+        <h3>🎯 OpenCV Auto-Detect</h3>
+
+        <label>Detection Method</label>
+        <select id="cvMethod" class="styled-select">
+          <option value="threshold">Dark Features (Threshold)</option>
+          <option value="tophat_bright">Bright Particles (Top-Hat)</option>
+          <option value="threshold_bright">Bright Particles (Threshold)</option>
+          <option value="adaptive">Adaptive</option>
+          <option value="canny">Canny Edges</option>
+          <option value="color_mask">Color Mask (Dark)</option>
+        </select>
+
+        <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
+          <label class="cv-checkbox">
+            <input type="checkbox" id="cvClahe"> Enable CLAHE
+          </label>
+          <label class="cv-checkbox" style="color: var(--solar-orange);">
+            <input type="checkbox" id="cvOverwrite" checked> Overwrite Labels
+          </label>
+        </div>
+
+        <div class="cv-row">
+          <div class="cv-field">
+            <label>Brightness <span id="cvBrightnessVal">0</span></label>
+            <input type="range" id="cvBrightness" min="-100" max="100" value="0" />
+          </div>
+          <div class="cv-field">
+            <label>Contrast <span id="cvContrastVal">1.0</span></label>
+            <input type="range" id="cvContrast" min="0.5" max="3.0" step="0.1" value="1.0" />
+          </div>
+        </div>
+
+        <div class="cv-row">
+          <div class="cv-field">
+            <label>Threshold <span id="cvThresh1Val">80</span></label>
+            <input type="range" id="cvThresh1" min="0" max="255" value="80" />
+          </div>
+          <div class="cv-field">
+            <label>Upper <span id="cvThresh2Val">255</span></label>
+            <input type="range" id="cvThresh2" min="0" max="255" value="255" />
+          </div>
+        </div>
+
+        <div class="cv-row">
+          <div class="cv-field">
+            <label>Min Area (px²)</label>
+            <input type="number" id="cvMinArea" value="50" min="5" />
+          </div>
+          <div class="cv-field">
+            <label>Max Area (px²)</label>
+            <input type="number" id="cvMaxArea" value="10000" min="50" />
+          </div>
+        </div>
+
+        <button id="btnRunOpenCV" class="btn-primary w-100" disabled>🚀 Run OpenCV Detect</button>
+      </div>
+
+    </div>
+
+    <!-- ═══ MAIN WORKSPACE ═══ -->
+    <div class="anno-workspace">
+
+      <div class="anno-toolbar">
+        <label>Draw class:</label>
+        <select id="drawClassId" class="styled-select">
+          <option value="0">0 · PbI₂ Excess</option>
+          <option value="1" selected>1 · 3D Pinholes</option>
+          <option value="2">2 · 3D-2D Pinholes</option>
+          <option value="3">3 · 3D Background</option>
+          <option value="4">4 · 3D-2D Background</option>
+        </select>
+
+        <div class="spacer"></div>
+
+        <div class="anno-nav">
+          <button id="annoPrev" class="btn-outline" disabled>◀</button>
+          <span id="annoProgress">0 / 0</span>
+          <button id="annoNext" class="btn-outline" disabled>▶</button>
+        </div>
+
+        <button id="btnSaveLabels" class="btn-primary" disabled>💾 Save</button>
+      </div>
+
+      <div class="anno-canvas-wrapper" id="canvasContainer">
+        <div class="anno-overlay" id="annoOverlay">
+          <img id="annoImage" class="anno-img" alt="Select a folder and image to begin" />
+          <canvas id="annoCanvas" class="anno-canvas"></canvas>
+        </div>
+        <p class="anno-hint">🖱 Click & drag to draw a box · Click a box to select · <kbd>Delete</kbd> to remove · 💾 Save to write .txt</p>
+      </div>
+
+    </div>
+  </div>
+
+</section>
+
+
+<!-- ═══════════════════════════════════ TAB 2 — SCIENCE ═══════════════════════════ -->
+<section class="tab-pane" id="tab-science">
+
+  <div class="science-hero">
+    <h1>Perovskite Solar Cells</h1>
+    <p>Exploring the next generation of photovoltaic technology — from crystal structure to production at scale.</p>
+  </div>
+
+  <div class="science-grid">
+
+    <!-- Card 1: Project -->
+    <div class="science-card">
+      <div class="card-icon" style="background: linear-gradient(135deg, rgba(255,107,53,0.2), rgba(255,107,53,0.05));">🔬</div>
+      <h3>The Project Scope</h3>
+      <p>This project applies <span class="highlight">deep-learning object detection</span> (YOLO11m) to Scanning Electron Microscope (SEM) images of perovskite thin-film solar cells. By automatically localizing defects — PbI₂ excess crystals, pinholes, and mixed-phase irregularities — we enable faster quality control in research labs and pilot production lines.</p>
+      <p style="margin-top: 0.8rem;">Traditional manual SEM annotation is time-consuming and subjective. Our pipeline replaces it with <span class="highlight">sub-second automated inference</span> on 224×224 px image patches, achieving 42.19% mAP50 across 5 defect/background classes.</p>
+    </div>
+
+    <!-- Card 2: What are PSCs? -->
+    <div class="science-card">
+      <div class="card-icon" style="background: linear-gradient(135deg, rgba(0,212,255,0.2), rgba(0,212,255,0.05));">⚡</div>
+      <h3>What Are Perovskite Solar Cells?</h3>
+      <p>Perovskite solar cells (PSCs) use a crystalline material with the <span class="highlight">ABX₃ perovskite structure</span> — typically methylammonium lead iodide (CH₃NH₃PbI₃) — as the light-absorbing layer. Key advantages:</p>
+      <ul>
+        <li>Record lab efficiencies exceeding <span class="highlight">26% (single-junction)</span></li>
+        <li>Solution-processable at low temperatures (&lt;150°C)</li>
+        <li>Tunable bandgap via halide composition (1.2–2.3 eV)</li>
+        <li>Thin-film flexibility for building-integrated PV (BIPV)</li>
+        <li>Dramatically lower material and energy costs vs. silicon</li>
+      </ul>
+    </div>
+
+    <!-- Card 3: Production -->
+    <div class="science-card">
+      <div class="card-icon" style="background: linear-gradient(135deg, rgba(168,85,247,0.2), rgba(168,85,247,0.05));">🏭</div>
+      <h3>Production & Scaling</h3>
+      <p>Unlike silicon cells requiring 1400°C wafer processing, perovskites are manufactured via scalable coating techniques:</p>
+      <ul>
+        <li><strong>Slot-die coating</strong> — continuous roll-to-roll deposition</li>
+        <li><strong>Inkjet printing</strong> — pixelated patterning for custom modules</li>
+        <li><strong>Spray coating</strong> — large-area rapid deposition</li>
+        <li><strong>Vacuum co-evaporation</strong> — high uniformity for tandems</li>
+      </ul>
+      <p style="margin-top: 0.6rem;">The layered architecture (substrate → ETL → perovskite → HTL → electrode) is assembled sequentially, with <span class="highlight">laser scribing</span> for monolithic series interconnection. Final encapsulation hermetically seals against moisture.</p>
+    </div>
+
+    <!-- Card 4: Defects explained -->
+    <div class="science-card">
+      <div class="card-icon" style="background: linear-gradient(135deg, rgba(250,204,21,0.2), rgba(250,204,21,0.05));">🔎</div>
+      <h3>Defects in Perovskite Films</h3>
+      <p>SEM imaging reveals critical microstructural defects that degrade cell performance:</p>
+      <ul>
+        <li><strong style="color: #FF6B35;">PbI₂ Excess</strong> — Bright crystallites from incomplete precursor conversion; cause recombination losses</li>
+        <li><strong style="color: #00D4FF;">Pinholes (3D)</strong> — Dark voids in pure 3D perovskite; create shunt paths, reducing V<sub>oc</sub></li>
+        <li><strong style="color: #A855F7;">Pinholes (3D-2D mixed)</strong> — Voids at the 3D/2D interface; compromise passivation</li>
+      </ul>
+      <p style="margin-top: 0.6rem;">Detecting these defects early in the fabrication pipeline prevents costly downstream failures.</p>
+    </div>
+
+    <!-- Card 5: Recent Research (full-width) -->
+    <div class="science-card full-width">
+      <div class="card-icon" style="background: linear-gradient(135deg, rgba(74,222,128,0.2), rgba(74,222,128,0.05));">🧪</div>
+      <h3>Recent Research Breakthroughs (2025–2026)</h3>
+      <div class="research-timeline">
+        <div class="timeline-item">
+          <div class="year">Efficiency</div>
+          <h4>Tandem Records &gt; 34%</h4>
+          <p>Perovskite-silicon tandem cells have surpassed 34% certified efficiency using optimized interlayer engineering and bandgap tuning.</p>
+        </div>
+        <div class="timeline-item">
+          <div class="year">Stability</div>
+          <h4>Self-Assembled Monolayers (SAMs)</h4>
+          <p>SAM-based interface passivation suppresses ion migration and shields perovskite from moisture degradation, extending operational lifetimes beyond 10,000 hours.</p>
+        </div>
+        <div class="timeline-item">
+          <div class="year">Fabrication</div>
+          <h4>Molecular Press Annealing (MPA)</h4>
+          <p>A novel annealing technique that improves crystallinity and reduces defect density simultaneously, yielding more uniform large-area films.</p>
+        </div>
+        <div class="timeline-item">
+          <div class="year">Commercialization</div>
+          <h4>Pilot-Line Scaling</h4>
+          <p>Multiple companies now operating GW-scale pilot lines for perovskite-silicon tandems, transitioning from lab prototypes to commercial modules.</p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════ TAB 3 — BENCHMARK ═══════════════════════════ -->
+<section class="tab-pane" id="tab-benchmark">
+
+  <div class="bench-hero">
+    <h1>Model Benchmarking</h1>
+    <p>6 YOLO variants trained on the balanced perovskite defect dataset — here's how they compare.</p>
+  </div>
+
+  <!-- Quick stats (populated by JS) -->
+  <div class="stats-row" id="statsRow"></div>
+
+  <!-- Comparison table (populated by JS) -->
+  <div class="glass-card">
+    <h3 style="margin-bottom: 1rem;">Model Comparison</h3>
+    <div class="table-wrapper">
+      <table class="cmp-table" id="cmpTable">
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>mAP50</th>
+            <th>mAP50-95</th>
+            <th>Precision</th>
+            <th>Recall</th>
+            <th>F1</th>
+            <th>Epochs</th>
+            <th>Img Size</th>
+            <th>Train Time</th>
+          </tr>
+        </thead>
+        <tbody id="cmpTableBody"></tbody>
+      </table>
+    </div>
+    <p style="font-size: 0.78rem; color: var(--text-muted); margin-top: 0.6rem;">🟠 Orange = best in column &nbsp;|&nbsp; 🟢 Green row = overall winner</p>
+  </div>
+
+  <!-- Bar chart: mAP50-95 -->
+  <div class="glass-card chart-container" id="mapChart">
+    <h3>mAP50-95 Comparison</h3>
+    <div class="bar-chart" id="barChart"></div>
+  </div>
+
+  <!-- Model Explorer (dynamic graph viewing) -->
+  <div class="glass-card explorer-card">
+    <div class="explorer-header">
+      <h3>📈 Model Metrics Explorer</h3>
+      <select id="modelSelect" class="styled-select"></select>
+    </div>
+    <div class="explorer-content" id="explorerContent">
+      <div class="explorer-col">
+        <h4>Training Metrics & Loss</h4>
+        <div class="image-wrapper">
+          <img id="imgResults" src="" alt="Training Results Graph" />
+        </div>
+      </div>
+      <div class="explorer-col">
+        <h4>Normalized Confusion Matrix</h4>
+        <div class="image-wrapper">
+          <img id="imgConfusion" src="" alt="Confusion Matrix" />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- YOLO Architecture Visual -->
+  <div class="glass-card explorer-card mt-3">
+    <div class="explorer-header">
+      <h3>🧠 YOLO11m Architecture</h3>
+    </div>
+    <div class="explorer-content" style="display: block;">
+      <p style="margin-bottom: 1rem;">The detection pipeline processes images through an optimized backbone (darknet/CSP), a PANet neck for multi-scale feature fusion, and a decoupled detection head providing scale-specific outputs (P3, P4, P5).</p>
+      <div class="arch-img-block">
+        <img class="arch-static-img" src="/static/yolo11_architecture.png" alt="YOLO11 Architecture Diagram" />
+        <hr style="border: 0; border-top: 1px solid var(--border); margin: 1.5rem 0;" />
+        <img class="arch-static-img" src="/static/sensors-25-02270-g005.png" alt="Sensor Diagram" />
+      </div>
+    </div>
+  </div>
+
+  <!-- Architecture Deep-Dive -->
+  <div class="glass-card">
+    <h3 style="margin-bottom: 1.2rem;">🏗 Architecture Deep-Dive: YOLO11m</h3>
+    <p style="color: var(--text-secondary); margin-bottom: 1.5rem; font-size: 0.9rem; line-height: 1.7;">
+      YOLO11m (Ultralytics, 2024) is a medium-sized single-stage object detector optimized for real-time inference. It processes images in a single forward pass through three stages: <strong>Backbone → Neck → Head</strong>.
+    </p>
+
+    <div class="accordion" id="archAccordion">
+
+      <div class="accordion-item">
+        <div class="accordion-header" onclick="toggleAccordion(this)">
+          <h4>🧠 Backbone — Feature Extraction</h4>
+          <span class="arrow">▼</span>
+        </div>
+        <div class="accordion-body">
+          <p>The backbone extracts hierarchical features from the input image using convolutional blocks. YOLO11m uses an enhanced CSP (Cross-Stage Partial) architecture with C2f modules:</p>
+          <ul class="layer-list">
+            <li><span class="layer-dot" style="background: var(--solar-orange);"></span> <strong>Conv2d + BatchNorm + SiLU</strong> — Initial stem block, reduces resolution by 2×</li>
+            <li><span class="layer-dot" style="background: var(--electric-cyan);"></span> <strong>C2f (Cross-Stage Partial v2)</strong> — Splits feature maps, processes via bottleneck blocks, then concatenates for richer gradient flow</li>
+            <li><span class="layer-dot" style="background: var(--purple);"></span> <strong>SPPF (Spatial Pyramid Pooling - Fast)</strong> — Multi-scale pooling at the backbone tail, capturing context at 5×5, 9×9, and 13×13 receptive fields</li>
+          </ul>
+          <p style="margin-top: 0.8rem;">Output: 3 feature maps at ×8, ×16, ×32 downsampling (P3, P4, P5), encoding fine details through coarse semantics.</p>
+        </div>
+      </div>
+
+      <div class="accordion-item">
+        <div class="accordion-header" onclick="toggleAccordion(this)">
+          <h4>🔗 Neck — Feature Fusion (PANet)</h4>
+          <span class="arrow">▼</span>
+        </div>
+        <div class="accordion-body">
+          <p>The neck fuses the backbone's multi-scale feature maps using a <strong>Path Aggregation Network (PANet)</strong>:</p>
+          <ul class="layer-list">
+            <li><span class="layer-dot" style="background: var(--solar-gold);"></span> <strong>Upsample + Concat</strong> — Top-down path brings high-level semantics to fine-grained features</li>
+            <li><span class="layer-dot" style="background: var(--green);"></span> <strong>C2f Fusion Blocks</strong> — Bottom-up path re-aggregates localization details from low levels</li>
+            <li><span class="layer-dot" style="background: var(--electric-cyan);"></span> <strong>1×1 Convolutions</strong> — Channel reduction for computational efficiency</li>
+          </ul>
+          <p style="margin-top: 0.8rem;">This bidirectional fusion is critical for detecting small defects (pinholes ~10 px) alongside large PbI₂ clusters simultaneously.</p>
+        </div>
+      </div>
+
+      <div class="accordion-item">
+        <div class="accordion-header" onclick="toggleAccordion(this)">
+          <h4>📍 Detection Head — Decoupled Head</h4>
+          <span class="arrow">▼</span>
+        </div>
+        <div class="accordion-body">
+          <p>YOLO11m uses a <strong>decoupled anchor-free head</strong> with separate branches for classification and regression:</p>
+          <ul class="layer-list">
+            <li><span class="layer-dot" style="background: var(--solar-orange);"></span> <strong>Classification Branch</strong> — Predicts class probabilities for each grid cell (5 classes: PbI₂, 3D pinholes, 3D-2D pinholes, 3D background, 3D-2D background)</li>
+            <li><span class="layer-dot" style="background: var(--indigo);"></span> <strong>Regression Branch</strong> — Predicts bounding box coordinates (x, y, w, h) using Distribution Focal Loss (DFL) for precise localization</li>
+            <li><span class="layer-dot" style="background: var(--green);"></span> <strong>Objectness Score</strong> — Confidence that a grid cell contains any object, filtered at inference via NMS</li>
+          </ul>
+          <p style="margin-top: 0.8rem;">The decoupled design improves convergence by letting classification and regression optimize independently.</p>
+        </div>
+      </div>
+
+      <div class="accordion-item">
+        <div class="accordion-header" onclick="toggleAccordion(this)">
+          <h4>⚙️ Training Configuration</h4>
+          <span class="arrow">▼</span>
+        </div>
+        <div class="accordion-body">
+          <ul class="layer-list">
+            <li><span class="layer-dot" style="background: var(--solar-orange);"></span> <strong>Epochs:</strong> 50</li>
+            <li><span class="layer-dot" style="background: var(--electric-cyan);"></span> <strong>Image Size:</strong> 224 × 224 px</li>
+            <li><span class="layer-dot" style="background: var(--purple);"></span> <strong>Dataset:</strong> Balanced (augmented class 2: 14→80 images, backgrounds subsampled)</li>
+            <li><span class="layer-dot" style="background: var(--solar-gold);"></span> <strong>Augmentation:</strong> Mosaic, MixUp, HSV jitter, random flip</li>
+            <li><span class="layer-dot" style="background: var(--green);"></span> <strong>Optimizer:</strong> AdamW with cosine LR scheduler</li>
+            <li><span class="layer-dot" style="background: var(--indigo);"></span> <strong>Loss:</strong> CIoU (bbox) + BCE (class) + DFL (distribution)</li>
+          </ul>
+        </div>
+      </div>
+
+    </div><!-- /accordion -->
+  </div>
+
+</section>
+</div><!-- /tab-content -->
+
+<script src="/static/app.js"></script>
+</body>
+</html>

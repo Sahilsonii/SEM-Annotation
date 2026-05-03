@@ -1,11 +1,3 @@
-"""
-train_all_gpu.py
-
-Script for headless sequential training of all 6 required YOLO models
-on a dedicated GPU machine, plus Faster R-CNN (torchvision).
-
-Run this script: python train_all_gpu.py
-"""
 import os
 import sys
 import json
@@ -13,75 +5,262 @@ import time
 import logging
 from datetime import datetime
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+import random
+from collections import Counter
+import shutil
+
+# ── LOGGING SETUP ─────────────────────────────────────────────────────────────
+
+HERE         = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(HERE)
+
+LOG_DIR = os.path.join(PROJECT_ROOT, "experiments", "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, f"training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+
+
+class _TeeLogger:
+    """Writes every print() call to both console and the log file."""
+    def __init__(self, filepath, stream=None):
+        self._file   = open(filepath, "a", encoding="utf-8", buffering=1)
+        self._stream = stream or sys.__stdout__
+    def write(self, msg):
+        self._stream.write(msg)
+        self._file.write(msg)
+    def flush(self):
+        self._stream.flush()
+        self._file.flush()
+    def close(self):
+        self._file.close()
+
+sys.stdout = _TeeLogger(LOG_FILE, sys.__stdout__)
+
+_file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+_file_handler.setFormatter(logging.Formatter("%(asctime)s  %(levelname)s: %(message)s"))
+_console_handler = logging.StreamHandler(sys.__stdout__)
+_console_handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+
+logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _console_handler])
 logger = logging.getLogger(__name__)
 
+print(f"\n  [LOG] Log file: {LOG_FILE}\n")
+
+
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-EPOCHS   = 200
-IMGSZ    = 1024
-BATCH    = 4        # Increase to 8 or 16 if your GPU handles it
-PATIENCE = 0        # 0 = disabled (run all epochs)
-CACHE    = True     # Caches images to RAM for speed
+EPOCHS      = 50
+IMGSZ       = 224
+BATCH       = 4
+WORKERS     = 0
+SAVE_PERIOD = 10
+
+PATIENCE = 15
+CACHE    = False
 AUGMENT  = True
 COS_LR   = True
 
 MODELS_TO_TRAIN = [
-    # Small Models
-    {"label": "yolov8s",  "weights": "yolov8s.pt"},
-    {"label": "yolo26s",  "weights": "yolo26s.pt"},
-    # Medium Models
-    {"label": "yolov8m",  "weights": "yolov8m.pt"},
-    {"label": "yolo26m",  "weights": "yolo26m.pt"},
-    # Large Models
-    {"label": "yolov8l",  "weights": "yolov8l.pt"},
-    {"label": "yolo26l",  "weights": "yolo26l.pt"},
+    {"label": "yolo11s",  "weights": "yolo11s.pt"},
+    {"label": "yolo11m",  "weights": "yolo11m.pt"},
+    {"label": "yolo11l",  "weights": "yolo11l.pt"},
 ]
 
-# Faster R-CNN config
-FRCNN_EPOCHS = 50
-FRCNN_BATCH = 4
-FRCNN_LR = 0.005
-FRCNN_MOMENTUM = 0.9
-FRCNN_WEIGHT_DECAY = 0.0005
-FRCNN_LR_STEP_SIZE = 15
-FRCNN_LR_GAMMA = 0.1
-FRCNN_NUM_CLASSES = 6  # 5 classes + 1 background
-FRCNN_IMGSZ = 800
-FRCNN_VAL_SPLIT = 0.2
-# ─────────────────────────────────────────────────────────────────────────────
 
-HERE         = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(HERE)
-BALANCED_DIR = os.path.join(PROJECT_ROOT, "balanced_dataset")
-SPLIT_DIR    = os.path.join(PROJECT_ROOT, "balanced_dataset_split")
-YAML_PATH    = os.path.join(BALANCED_DIR, "data.yaml")
+# 80/10/10 Split Config
+TRAIN_RATIO = 0.8
+VAL_RATIO   = 0.1
+TEST_RATIO  = 0.1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NEW: Source dataset has class-named subfolders, split dataset uses txt-index
+
+SOURCE_DIR = os.path.join(PROJECT_ROOT, "dataset_split_224")         # nested per-class folders
+SPLIT_DIR  = SOURCE_DIR                                             # where splits live
+YAML_PATH  = os.path.join(SPLIT_DIR, "data.yaml")
+
+# Known problematic samples that can block image decoding during validation.
+KNOWN_BAD_IMAGES = {
+    os.path.join(SPLIT_DIR, "images", "5-5_patch_4_5.jpg"),
+}
+
+# Class folder → (class_id, display_name)
+CLASS_MAP = {
+    "class0_pbI2":             ("0", "PbI2           [DEFECT]"),
+    "class1_3D_pinholes":      ("1", "3D Pinholes    [DEFECT]"),
+    "class2_3D-2D_pinholes":   ("2", "3D-2D Pinholes [DEFECT]"),
+    "class3_3D_background":    ("3", "3D Background"),
+    "class4_3D-2D_background": ("4", "3D-2D Background"),
+}
 
 sys.path.insert(0, PROJECT_ROOT)
-sys.path.insert(0, HERE)
 
 
-# ── YOLO TRAINING (UNCHANGED LOGIC) ──────────────────────────────────────────
+def organize_stratified_split(source_root, split_root, train_ratio=0.8, val_ratio=0.1):
+    """
+    Creates stratified train.txt / val.txt / test.txt index files by scanning
+    the per-class subfolders inside `balanced_dataset/images/classN_*/`.
+    NO FILES ARE MOVED. Fully resumable.
+    """
+    src_img_root = os.path.join(source_root, "images")
+    src_lbl_root = os.path.join(source_root, "labels")
+
+    os.makedirs(split_root, exist_ok=True)
+    train_txt = os.path.join(split_root, "train.txt")
+    val_txt   = os.path.join(split_root, "val.txt")
+    test_txt  = os.path.join(split_root, "test.txt")
+
+    def _sanitize_split_files(txt_paths):
+        removed_total = 0
+        for txt_path in txt_paths:
+            if not os.path.exists(txt_path):
+                continue
+            with open(txt_path, "r") as f:
+                lines = [ln.strip() for ln in f if ln.strip()]
+            clean = [ln for ln in lines if os.path.normcase(os.path.abspath(ln)) not in
+                     {os.path.normcase(os.path.abspath(p)) for p in KNOWN_BAD_IMAGES}]
+            removed = len(lines) - len(clean)
+            if removed > 0:
+                with open(txt_path, "w") as f:
+                    f.write("\n".join(clean))
+                removed_total += removed
+                print(f"  Removed {removed} known bad sample(s) from {os.path.basename(txt_path)}")
+        return removed_total
+
+    # ── Already split? Print counts and return ────────────────────────────────
+    if all(os.path.exists(p) for p in (train_txt, val_txt, test_txt)):
+        _sanitize_split_files((train_txt, val_txt, test_txt))
+        n_tr = sum(1 for _ in open(train_txt))
+        n_va = sum(1 for _ in open(val_txt))
+        n_te = sum(1 for _ in open(test_txt))
+        if n_tr > 0 and n_va > 0 and n_te > 0:
+            print(f"\n  Split index files exist  ->  Train: {n_tr:,} | Val: {n_va:,} | Test: {n_te:,}")
+            return
+
+    if not os.path.isdir(src_img_root):
+        raise FileNotFoundError(f"Source images/ not found in {source_root}")
+    if not os.path.isdir(src_lbl_root):
+        raise FileNotFoundError(f"Source labels/ not found in {source_root}")
+
+    # ── Enumerate images by class subfolder ───────────────────────────────────
+    groups = {cls_id: [] for _, (cls_id, _) in CLASS_MAP.items()}
+    missing_classes = []
+
+    for folder_name, (cls_id, _) in CLASS_MAP.items():
+        cls_img_dir = os.path.join(src_img_root, folder_name)
+        if not os.path.isdir(cls_img_dir):
+            missing_classes.append(folder_name)
+            continue
+        for fname in sorted(os.listdir(cls_img_dir)):
+            if fname.lower().endswith((".jpg", ".jpeg", ".png")):
+                img_path = os.path.abspath(os.path.join(cls_img_dir, fname))
+                if os.path.normcase(img_path) in {os.path.normcase(os.path.abspath(p)) for p in KNOWN_BAD_IMAGES}:
+                    continue
+                groups[cls_id].append(img_path)
+
+    if missing_classes:
+        print(f"  ⚠ Missing class folders (skipped): {missing_classes}")
+
+    total = sum(len(v) for v in groups.values())
+    if total == 0:
+        raise RuntimeError(f"No images found under {src_img_root}")
+
+    print(f"\n{'='*60}")
+    print(f"  STRATIFIED SPLIT  (80% Train / 10% Val / 10% Test)")
+    print(f"  Source: {source_root}  (nested class folders)")
+    print(f"  Total patches: {total:,}  |  Method: index files")
+    print(f"{'='*60}")
+
+    print(f"\n  {'Class':<6} {'Name':<28} {'Patches':>8}  {'Type'}")
+    print(f"  {'-'*55}")
+    for prefix, (cls_id, name) in CLASS_MAP.items():
+        count = len(groups[cls_id])
+        tag = "DEFECT" if cls_id in ("0", "1", "2") else "background"
+        print(f"  {cls_id:<6} {name:<28} {count:>8,}  {tag}")
+    print(f"  {'TOTAL':<35} {total:>8,}")
+
+    # ── Build stratified split lists ──────────────────────────────────────────
+    random.seed(42)
+    split_lists = {"train": [], "val": [], "test": []}
+    split_stats = {"train": Counter(), "val": Counter(), "test": Counter()}
+
+    for cls_id, paths in groups.items():
+        if not paths:
+            continue
+        random.shuffle(paths)
+        n_train = int(len(paths) * train_ratio)
+        n_val   = int(len(paths) * val_ratio)
+        split_lists["train"].extend(paths[:n_train])
+        split_lists["val"].extend(paths[n_train:n_train + n_val])
+        split_lists["test"].extend(paths[n_train + n_val:])
+        split_stats["train"][cls_id] += n_train
+        split_stats["val"][cls_id]   += n_val
+        split_stats["test"][cls_id]  += len(paths) - n_train - n_val
+
+    # ── Shuffle each split (so classes are mixed) ─────────────────────────────
+    for k in split_lists:
+        random.shuffle(split_lists[k])
+
+    # ── Write txt files ───────────────────────────────────────────────────────
+    for split_name, txt_path in [("train", train_txt), ("val", val_txt), ("test", test_txt)]:
+        with open(txt_path, "w") as f:
+            f.write("\n".join(split_lists[split_name]))
+        print(f"  Written: {os.path.basename(txt_path)}  ({len(split_lists[split_name]):,} entries)")
+
+    _sanitize_split_files((train_txt, val_txt, test_txt))
+
+    # ── Final report ──────────────────────────────────────────────────────────
+    cls_display = {cls_id: name for _, (cls_id, name) in CLASS_MAP.items()}
+
+    print(f"\n{'='*60}")
+    print("  SPLIT COMPLETE — FINAL CLASS DISTRIBUTION")
+    print(f"{'='*60}")
+    print(f"  {'Class':<6} {'Name':<28} {'Train':>7} {'Val':>7} {'Test':>7}")
+    print(f"  {'-'*57}")
+    for cls_id in sorted(cls_display.keys()):
+        tr = split_stats["train"].get(cls_id, 0)
+        va = split_stats["val"].get(cls_id, 0)
+        te = split_stats["test"].get(cls_id, 0)
+        if tr + va + te == 0:
+            continue
+        print(f"  {cls_id:<6} {cls_display[cls_id]:<28} {tr:>7,} {va:>7,} {te:>7,}")
+    print(f"  {'-'*57}")
+    print(f"  {'TOTAL':<34} "
+          f"{len(split_lists['train']):>7,} "
+          f"{len(split_lists['val']):>7,} "
+          f"{len(split_lists['test']):>7,}")
+    print(f"{'='*60}\n")
+
+
+# ── YOLO TRAINING ─────────────────────────────────────────────────────────────
 
 def train_yolo_models():
-    if not os.path.exists(YAML_PATH):
-        logger.error(f"data.yaml not found at {YAML_PATH}")
-        logger.error("Ensure the balanced dataset is present before training.")
+    if not os.path.exists(SOURCE_DIR):
+        logger.error(f"Source dataset not found at {SOURCE_DIR}")
         return []
+
+    # Build stratified split index files
+    organize_stratified_split(SOURCE_DIR, SPLIT_DIR, TRAIN_RATIO, VAL_RATIO)
 
     import yaml as _yaml
     classes = {0: "PbI2", 1: "3D_pinholes", 2: "3D-2D_pinholes",
                3: "3D_background", 4: "3D-2D_background"}
     names   = [classes[k] for k in sorted(classes)]
+
+    # IMPORTANT: YOLO maps images/ → labels/ by swapping the folder segment.
+    # Since our txt files contain absolute paths to `balanced_dataset/images/classN_*/foo.jpg`,
+    # YOLO will automatically look for labels at `balanced_dataset/labels/classN_*/foo.txt`.
+    # No extra config needed.
+
     yaml_data = {
-        "path": BALANCED_DIR,
-        "train": "images",
-        "val": "images",
+        "path": SPLIT_DIR,
+        "train": os.path.join(SPLIT_DIR, "train.txt"),
+        "val":   os.path.join(SPLIT_DIR, "val.txt"),
+        "test":  os.path.join(SPLIT_DIR, "test.txt"),
         "nc": len(classes),
         "names": names
     }
     with open(YAML_PATH, "w") as f:
         _yaml.dump(yaml_data, f, default_flow_style=False)
-    print(f"✓ data.yaml validated at: {YAML_PATH}")
+    print(f"[OK] data.yaml (Stratified txt-index) validated at: {YAML_PATH}")
 
     try:
         from model_handler import ModelHandler
@@ -92,362 +271,153 @@ def train_yolo_models():
             logger.error("Could not import ModelHandler.")
             return []
 
-    print(f"\n{'='*60}")
-    print(f"  GPU Lab Batch Training: {len(MODELS_TO_TRAIN)} YOLO models × {EPOCHS} epochs")
-    print(f"{'='*60}\n")
+    # ── Device Detection ──────────────────────────────────────────────────────
+    import torch
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        vram_gb  = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        device_str = f"GPU  --  {gpu_name}  ({vram_gb:.1f} GB VRAM)"
+        device_icon = "GPU"
+    else:
+        import platform
+        device_str = f"CPU  --  {platform.processor()}"
+        device_icon = "CPU"
+
+    # ── Architecture Summary Table ────────────────────────────────────────────
+    ARCH_TABLE = [
+        ("yolov8s",    "CSPDarknet-S",   "C2f+PAN", "Detect",  11.2,   28.7,  "YOLO"),
+        ("yolov8m",    "CSPDarknet-M",   "C2f+PAN", "Detect",  25.9,   79.0,  "YOLO"),
+        ("yolov8l",    "CSPDarknet-L",   "C2f+PAN", "Detect",  43.7,  165.2,  "YOLO"),
+    ]
+
+    print(f"\n{'='*72}")
+    print(f"  TRAINING SESSION — {len(MODELS_TO_TRAIN)} YOLO MODELS  |  {device_icon}: {device_str}")
+    print(f"{'='*72}")
+    print(f"  {'#':<3} {'Model':<12} {'Backbone':<20} {'Neck':<10} {'Head':<10} {'Params(M)':>9} {'GFLOPs':>7}  Type")
+    print(f"  {'-'*70}")
+    for i, (lbl, bb, neck, head, pm, gf, mtype) in enumerate(ARCH_TABLE, 1):
+        print(f"  {i:<3} {lbl:<12} {bb:<20} {neck:<10} {head:<10} {pm:>9.1f} {str(gf):>7}  {mtype}")
+    print(f"  {'-'*70}")
+    print(f"  Total trainable params: ~{sum(r[4] for r in ARCH_TABLE):.0f}M across all models")
+    print(f"\n  Training Config:")
+    print(f"    Image size  : {IMGSZ}x{IMGSZ}")
+    print(f"    Batch size  : {BATCH} (auto-adjusted per model size)")
+    print(f"    Epochs      : {EPOCHS}  (checkpointing every {SAVE_PERIOD} epochs)")
+    print(f"    Workers     : {WORKERS}  (prevents Windows freezing)")
+    print(f"    Classes     : 5  (3 defects + 2 backgrounds)")
+    print(f"    Source      : {SOURCE_DIR}")
+    print(f"    Split dir   : {SPLIT_DIR}")
+    print(f"    Device      : {device_str}")
+    print(f"{'='*72}\n")
 
     results_summary = []
+
+    VRAM_SAFE_BATCH = {"s": 16, "m": 8, "l": 4, "x": 2}
+
+    import gc
+    import torch
 
     for i, m in enumerate(MODELS_TO_TRAIN, 1):
         label   = m["label"]
         weights = m["weights"]
         wpath   = os.path.join(HERE, weights)
 
-        print(f"\n[{i}/{len(MODELS_TO_TRAIN)}] ▶ Training {label}  (pre-trained weights: {weights})")
+        # Check if model already trained
+        runs_dir = os.path.join(PROJECT_ROOT, "src", "runs", "detect")
+        existing_runs = [d for d in os.listdir(runs_dir) if d.startswith(label) and os.path.isdir(os.path.join(runs_dir, d))]
+        
+        if existing_runs:
+            # Check if any run has weights
+            has_weights = False
+            for run_dir in existing_runs:
+                weights_path = os.path.join(runs_dir, run_dir, "weights", "best.pt")
+                if os.path.exists(weights_path):
+                    has_weights = True
+                    print(f"\n[{i}/{len(MODELS_TO_TRAIN)}] ✓ {label} already trained")
+                    print(f"  Weights found: {weights_path}")
+                    results_summary.append((label, "Already trained", weights_path))
+                    break
+            
+            if has_weights:
+                continue
+
+        if not os.path.exists(wpath) and not (weights.startswith("yolov8") or weights.startswith("yolo11")):
+            print(f"  ⚠️ Skipping {label}: weights {weights} not found")
+            continue
+
+        size_key = label[-1] if label[-1] in VRAM_SAFE_BATCH else "s"
+        batch = VRAM_SAFE_BATCH.get(size_key, BATCH)
+
+        print(f"\n[{i}/{len(MODELS_TO_TRAIN)}] ▶ Training {label}  (weights: {weights}, batch: {batch})")
         print("-" * 60)
 
         try:
-            handler = ModelHandler(wpath if os.path.exists(wpath) else weights)
+            # Pass the weights name directly - Ultralytics will download if needed
+            handler = ModelHandler(weights)
             results, metrics_path = handler.train_model(
                 YAML_PATH,
                 epochs=EPOCHS,
                 imgsz=IMGSZ,
                 model_name=label,
-                batch=BATCH,
+                batch=batch,
+                workers=WORKERS,
+                save_period=SAVE_PERIOD,
                 patience=PATIENCE,
                 cache=CACHE,
                 augment=AUGMENT,
                 cos_lr=COS_LR,
             )
             best_pt = os.path.join(str(results.save_dir), "weights", "best.pt")
-            print(f"  ✅ {label} finished. Best weights saved to: {best_pt}")
+            print(f"  [SUCCESS] {label} finished. Best weights saved to: {best_pt}")
             if metrics_path:
-                print(f"  📊 Metrics saved to: {metrics_path}")
-            results_summary.append((label, "✅ Success", best_pt))
+                print(f"  [DATA] Metrics saved to: {metrics_path}")
+            results_summary.append((label, "Success", best_pt))
 
         except Exception as e:
-            print(f"  ❌ {label} failed with error: {e}")
-            results_summary.append((label, f"❌ Failed: {e}", "—"))
+            print(f"  [ERROR] {label} failed with error: {e}")
+            results_summary.append((label, f"Failed: {e}", "—"))
+
+        if 'handler' in locals():
+            del handler
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     return results_summary
 
 
-# ── FASTER R-CNN TRAINING ─────────────────────────────────────────────────────
 
-def train_faster_rcnn():
-    import torch
-    import torchvision
-    from torchvision.models.detection import fasterrcnn_resnet50_fpn
-    from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-    from torch.utils.data import DataLoader, random_split
-
-    from src.datasets.frcnn_dataset import SEMFasterRCNNDataset, collate_fn
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Faster R-CNN training on: {device}")
-    if device.type == "cuda":
-        logger.info(f"  GPU: {torch.cuda.get_device_name(0)}")
-
-    exp_dir = os.path.join(PROJECT_ROOT, "experiments", "faster_rcnn")
-    weights_dir = os.path.join(exp_dir, "weights")
-    logs_dir = os.path.join(exp_dir, "logs")
-    os.makedirs(weights_dir, exist_ok=True)
-    os.makedirs(logs_dir, exist_ok=True)
-
-    data_root = SPLIT_DIR if os.path.isdir(SPLIT_DIR) else BALANCED_DIR
-    img_dir = os.path.join(data_root, "images")
-    lbl_dir = os.path.join(data_root, "labels")
-
-    logger.info(f"Dataset root: {data_root}")
-
-    full_dataset = SEMFasterRCNNDataset(
-        img_dir=img_dir,
-        lbl_dir=lbl_dir,
-        num_classes=FRCNN_NUM_CLASSES,
-    )
-
-    if len(full_dataset) == 0:
-        logger.error("No images found for Faster R-CNN training.")
-        return "❌ No data", "—"
-
-    logger.info(f"Total samples: {len(full_dataset)}")
-
-    val_size = max(1, int(len(full_dataset) * FRCNN_VAL_SPLIT))
-    train_size = len(full_dataset) - val_size
-    train_dataset, val_dataset = random_split(
-        full_dataset, [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
-    )
-
-    train_loader = DataLoader(
-        train_dataset, batch_size=FRCNN_BATCH, shuffle=True,
-        num_workers=0, collate_fn=collate_fn, pin_memory=True,
-    )
-    val_loader = DataLoader(
-        val_dataset, batch_size=FRCNN_BATCH, shuffle=False,
-        num_workers=0, collate_fn=collate_fn, pin_memory=True,
-    )
-
-    logger.info(f"Train: {train_size} | Val: {val_size}")
-
-    model = fasterrcnn_resnet50_fpn(weights="DEFAULT")
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, FRCNN_NUM_CLASSES)
-    model.to(device)
-
-    params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.SGD(
-        params, lr=FRCNN_LR, momentum=FRCNN_MOMENTUM,
-        weight_decay=FRCNN_WEIGHT_DECAY,
-    )
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(
-        optimizer, step_size=FRCNN_LR_STEP_SIZE, gamma=FRCNN_LR_GAMMA,
-    )
-
-    train_losses = []
-    val_losses = []
-    best_val_loss = float("inf")
-    best_epoch = 0
-
-    print(f"\n{'='*60}")
-    print(f"  Faster R-CNN Training: {FRCNN_EPOCHS} epochs")
-    print(f"  Batch: {FRCNN_BATCH} | LR: {FRCNN_LR} | ImgSz: {FRCNN_IMGSZ}")
-    print(f"{'='*60}\n")
-
-    t_start = time.time()
-
-    for epoch in range(1, FRCNN_EPOCHS + 1):
-        model.train()
-        epoch_loss = 0.0
-        num_batches = 0
-
-        for images, targets in train_loader:
-            images = [img.to(device) for img in images]
-            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-
-            valid_batch = []
-            valid_targets = []
-            for img, tgt in zip(images, targets):
-                if tgt["boxes"].numel() > 0:
-                    valid_batch.append(img)
-                    valid_targets.append(tgt)
-
-            if len(valid_batch) == 0:
-                continue
-
-            loss_dict = model(valid_batch, valid_targets)
-            losses = sum(loss for loss in loss_dict.values())
-
-            optimizer.zero_grad()
-            losses.backward()
-            torch.nn.utils.clip_grad_norm_(params, max_norm=10.0)
-            optimizer.step()
-
-            epoch_loss += losses.item()
-            num_batches += 1
-
-        lr_scheduler.step()
-
-        avg_train_loss = epoch_loss / max(num_batches, 1)
-        train_losses.append(avg_train_loss)
-
-        model.eval()
-        val_loss = 0.0
-        val_batches = 0
-        with torch.no_grad():
-            model.train()
-            for images, targets in val_loader:
-                images = [img.to(device) for img in images]
-                targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-
-                valid_batch = []
-                valid_targets = []
-                for img, tgt in zip(images, targets):
-                    if tgt["boxes"].numel() > 0:
-                        valid_batch.append(img)
-                        valid_targets.append(tgt)
-
-                if len(valid_batch) == 0:
-                    continue
-
-                loss_dict = model(valid_batch, valid_targets)
-                losses = sum(loss for loss in loss_dict.values())
-                val_loss += losses.item()
-                val_batches += 1
-            model.eval()
-
-        avg_val_loss = val_loss / max(val_batches, 1)
-        val_losses.append(avg_val_loss)
-
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            best_epoch = epoch
-            best_path = os.path.join(weights_dir, "best.pt")
-            torch.save(model.state_dict(), best_path)
-
-        if epoch % 5 == 0 or epoch == 1:
-            print(f"  Epoch {epoch:3d}/{FRCNN_EPOCHS} | "
-                  f"Train Loss: {avg_train_loss:.4f} | "
-                  f"Val Loss: {avg_val_loss:.4f} | "
-                  f"LR: {optimizer.param_groups[0]['lr']:.6f}")
-
-    total_time = time.time() - t_start
-
-    last_path = os.path.join(weights_dir, "last.pt")
-    torch.save(model.state_dict(), last_path)
-
-    mAP = _compute_simple_map(model, val_loader, device)
-
-    metrics = {
-        "model": "faster_rcnn_resnet50_fpn",
-        "timestamp": datetime.now().isoformat(),
-        "epochs": FRCNN_EPOCHS,
-        "best_epoch": best_epoch,
-        "best_val_loss": round(best_val_loss, 6),
-        "final_train_loss": round(train_losses[-1], 6) if train_losses else 0,
-        "final_val_loss": round(val_losses[-1], 6) if val_losses else 0,
-        "mAP50": round(mAP, 4),
-        "train_time_s": round(total_time, 1),
-        "num_classes": FRCNN_NUM_CLASSES,
-        "train_samples": train_size,
-        "val_samples": val_size,
-        "batch_size": FRCNN_BATCH,
-        "learning_rate": FRCNN_LR,
-        "train_losses": [round(l, 6) for l in train_losses],
-        "val_losses": [round(l, 6) for l in val_losses],
-        "weights_best": best_path,
-        "weights_last": last_path,
-    }
-
-    metrics_path = os.path.join(exp_dir, "metrics.json")
-    with open(metrics_path, "w") as f:
-        json.dump(metrics, f, indent=2)
-
-    log_path = os.path.join(logs_dir, f"training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
-    with open(log_path, "w") as f:
-        json.dump(metrics, f, indent=2)
-
-    print(f"\n  ✅ Faster R-CNN training complete in {total_time:.1f}s")
-    print(f"  📊 Best val loss: {best_val_loss:.4f} (epoch {best_epoch})")
-    print(f"  📊 mAP@50: {mAP:.4f}")
-    print(f"  💾 Weights: {weights_dir}")
-    print(f"  📄 Metrics: {metrics_path}")
-
-    return "✅ Success", best_path
-
-
-def _compute_simple_map(model, val_loader, device, iou_threshold=0.5):
-    import torch
-    model.eval()
-    all_tp = 0
-    all_fp = 0
-    all_fn = 0
-
-    with torch.no_grad():
-        for images, targets in val_loader:
-            images = [img.to(device) for img in images]
-            predictions = model(images)
-
-            for pred, tgt in zip(predictions, targets):
-                pred_boxes = pred["boxes"].cpu()
-                pred_scores = pred["scores"].cpu()
-                pred_labels = pred["labels"].cpu()
-                gt_boxes = tgt["boxes"]
-                gt_labels = tgt["labels"]
-
-                score_mask = pred_scores > 0.5
-                pred_boxes = pred_boxes[score_mask]
-                pred_labels = pred_labels[score_mask]
-
-                if len(gt_boxes) == 0:
-                    all_fp += len(pred_boxes)
-                    continue
-                if len(pred_boxes) == 0:
-                    all_fn += len(gt_boxes)
-                    continue
-
-                gt_matched = set()
-                for pb, pl in zip(pred_boxes, pred_labels):
-                    best_iou = 0
-                    best_idx = -1
-                    for gi, (gb, gl) in enumerate(zip(gt_boxes, gt_labels)):
-                        if gi in gt_matched:
-                            continue
-                        if int(pl) != int(gl):
-                            continue
-                        iou = _box_iou_single(pb, gb)
-                        if iou > best_iou:
-                            best_iou = iou
-                            best_idx = gi
-                    if best_iou >= iou_threshold and best_idx >= 0:
-                        all_tp += 1
-                        gt_matched.add(best_idx)
-                    else:
-                        all_fp += 1
-                all_fn += len(gt_boxes) - len(gt_matched)
-
-    precision = all_tp / max(all_tp + all_fp, 1)
-    recall = all_tp / max(all_tp + all_fn, 1)
-    mAP = 2 * precision * recall / max(precision + recall, 1e-6)
-    return mAP
-
-
-def _box_iou_single(box1, box2):
-    x1 = max(float(box1[0]), float(box2[0]))
-    y1 = max(float(box1[1]), float(box2[1]))
-    x2 = min(float(box1[2]), float(box2[2]))
-    y2 = min(float(box1[3]), float(box2[3]))
-    inter = max(0, x2 - x1) * max(0, y2 - y1)
-    area1 = (float(box1[2]) - float(box1[0])) * (float(box1[3]) - float(box1[1]))
-    area2 = (float(box2[2]) - float(box2[0])) * (float(box2[3]) - float(box2[1]))
-    union = area1 + area2 - inter
-    return inter / max(union, 1e-6)
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Train YOLO + Faster R-CNN models")
-    parser.add_argument("--yolo-only", action="store_true", help="Train only YOLO models")
-    parser.add_argument("--frcnn-only", action="store_true", help="Train only Faster R-CNN")
-    parser.add_argument("--frcnn-epochs", type=int, default=None)
-    parser.add_argument("--frcnn-batch", type=int, default=None)
-    parser.add_argument("--frcnn-lr", type=float, default=None)
+    parser = argparse.ArgumentParser(description="Train YOLO models")
     args = parser.parse_args()
 
-    if args.frcnn_epochs:
-        FRCNN_EPOCHS = args.frcnn_epochs
-    if args.frcnn_batch:
-        FRCNN_BATCH = args.frcnn_batch
-    if args.frcnn_lr:
-        FRCNN_LR = args.frcnn_lr
-
     results_summary = []
+    
+    yolo_results = train_yolo_models()
+    results_summary.extend(yolo_results)
 
-    # ── YOLO ──
-    if not args.frcnn_only:
-        yolo_results = train_yolo_models()
-        results_summary.extend(yolo_results)
-
-    # ── Faster R-CNN ──
-    if not args.yolo_only:
-        print(f"\n{'='*60}")
-        print(f"  STARTING FASTER R-CNN TRAINING")
-        print(f"{'='*60}")
-        try:
-            frcnn_status, frcnn_path = train_faster_rcnn()
-            results_summary.append(("faster_rcnn", frcnn_status, frcnn_path))
-        except Exception as e:
-            print(f"  ❌ Faster R-CNN failed: {e}")
-            import traceback
-            traceback.print_exc()
-            results_summary.append(("faster_rcnn", f"❌ Failed: {e}", "—"))
-
-    # ── Summary ──
     print(f"\n{'='*60}")
     print("  ALL TRAINING RUNS COMPLETE")
     print(f"{'='*60}")
     for label, status, pt in results_summary:
         print(f"  {label:16s} | {status}")
     print()
+    
+    # Generate benchmark PDF
+    print(f"\n{'='*60}")
+    print("  GENERATING BENCHMARK PDF REPORT")
+    print(f"{'='*60}")
+    try:
+        import subprocess
+        pdf_script = os.path.join(HERE, "create_benchmark_pdf.py")
+        result = subprocess.run([sys.executable, pdf_script], cwd=PROJECT_ROOT)
+        if result.returncode == 0:
+            print("\n[SUCCESS] Benchmark PDF generated!")
+    except Exception as e:
+        print(f"\n[WARNING] Could not generate PDF: {e}")
+        print("  Run manually: python scripts/create_benchmark_pdf.py")
